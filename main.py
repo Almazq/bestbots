@@ -1,19 +1,10 @@
 import asyncio
-import os
 from aiogram import Bot, Dispatcher
 from aiogram.filters import CommandStart
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 
-# -------------------------------------------------
-# Загружаем токен
-# -------------------------------------------------
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-print("🚀 BOT_TOKEN LOADED:", repr(BOT_TOKEN))
-
-if not BOT_TOKEN:
-    raise Exception("❌ BOT_TOKEN NOT FOUND IN ENVIRONMENT")
-
-# -------------------------------------------------
+# 🚨 ВСТАВЬ СВОЙ НАСТОЯЩИЙ ТОКЕН СЮДА (если репо приватный)
+BOT_TOKEN = "8425860077:AAESfF3o_58rN9uKMtnWStW0iCyrJNqa56w"
 
 bot = Bot(BOT_TOKEN)
 dp = Dispatcher()
