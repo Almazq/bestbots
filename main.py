@@ -4,7 +4,16 @@ from aiogram import Bot, Dispatcher
 from aiogram.filters import CommandStart
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 
+# -------------------------------------------------
+# Загружаем токен
+# -------------------------------------------------
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+print("🚀 BOT_TOKEN LOADED:", repr(BOT_TOKEN))
 
+if not BOT_TOKEN:
+    raise Exception("❌ BOT_TOKEN NOT FOUND IN ENVIRONMENT")
+
+# -------------------------------------------------
 
 bot = Bot(BOT_TOKEN)
 dp = Dispatcher()
