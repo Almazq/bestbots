@@ -66,23 +66,21 @@ def _save_records(records: List[Dict[str, Any]]) -> None:
 
 def _seed_default_managers_if_empty() -> None:
 	"""
-	Populate three default managers if no managers are present or file is corrupt.
+	Populate default managers if no managers are present or file is corrupt.
 	"""
 	try:
 		raw = DB_MANAGERS_FILE.read_text(encoding="utf-8") if DB_MANAGERS_FILE.exists() else ""
 		data = json.loads(raw or "[]")
 		if not isinstance(data, list) or len(data) == 0:
 			defaults = [
-				{"id": "m1", "name": "Менеджер 1"},
-				{"id": "m2", "name": "Менеджер 2"},
-				{"id": "m3", "name": "Менеджер 3"},
+				{"id": "m1", "name": "Айгерім"},
+				{"id": "m2", "name": "Мақпал"},
 			]
 			DB_MANAGERS_FILE.write_text(json.dumps(defaults, ensure_ascii=False, indent=2), encoding="utf-8")
 	except json.JSONDecodeError:
 		defaults = [
-			{"id": "m1", "name": "Менеджер 1"},
-			{"id": "m2", "name": "Менеджер 2"},
-			{"id": "m3", "name": "Менеджер 3"},
+			{"id": "m1", "name": "Айгерім"},
+			{"id": "m2", "name": "Мақпал"},
 		]
 		DB_MANAGERS_FILE.write_text(json.dumps(defaults, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -201,6 +199,20 @@ def list_managers() -> Dict[str, Any]:
 	with _db_lock:
 		managers = _load_list(DB_MANAGERS_FILE)
 	return {"ok": True, "count": len(managers), "managers": managers}
+
+
+@app.delete("/api/managers/{manager_id}")
+def delete_manager(manager_id: str) -> Dict[str, Any]:
+	"""
+	Delete manager by id. Returns 404 if not found.
+	"""
+	with _db_lock:
+		managers = _load_list(DB_MANAGERS_FILE)
+		remaining = [m for m in managers if str(m.get("id")) != str(manager_id)]
+		if len(remaining) == len(managers):
+			raise HTTPException(status_code=404, detail="Manager not found")
+		_save_list(DB_MANAGERS_FILE, remaining)
+	return {"ok": True, "deleted_id": manager_id, "count": len(remaining)}
 
 
 @app.post("/api/orders")
