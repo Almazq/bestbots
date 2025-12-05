@@ -12,13 +12,14 @@ from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(title="BestsBot Backend", version="1.0.0")
 
-# Allow calls from any origin (adjust to your frontend domain if needed)
+# CORS: fully open for all origins/methods/headers (no credentials)
 app.add_middleware(
 	CORSMiddleware,
-	allow_origins=["https://aibest-five.vercel.app"],
-	allow_credentials=True,
-	allow_methods=["GET", "POST", "OPTIONS"],
-	allow_headers=["Content-Type"],
+	allow_origins=["*"],
+	allow_credentials=False,
+	allow_methods=["*"],
+	allow_headers=["*"],
+	expose_headers=["*"],
 )
 
 
