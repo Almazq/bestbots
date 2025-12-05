@@ -260,6 +260,19 @@ def list_orders() -> Dict[str, Any]:
 	return {"ok": True, "count": len(orders), "orders": orders}
 
 
+@app.get("/")
+def root() -> Dict[str, Any]:
+	"""
+	Simple health/info endpoint for load balancers and uptime checks.
+	"""
+	return {"ok": True, "service": "bestsbot-backend", "time": datetime.utcnow().isoformat() + "Z"}
+
+
+@app.get("/healthz")
+def healthz() -> Dict[str, Any]:
+	return {"status": "ok"}
+
+
 if __name__ == "__main__":
 	# Local run:
 	#   uvicorn server:app --host 0.0.0.0 --port 8000
