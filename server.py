@@ -6,8 +6,9 @@ from pathlib import Path
 from threading import Lock
 from typing import Any, Dict, List
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 
 app = FastAPI(title="BestsBot Backend", version="1.0.0")
@@ -22,11 +23,15 @@ app.add_middleware(
 	expose_headers=["*"],
 )
 
+# Serve files from data directory, including invoices
+app.mount("/static", StaticFiles(directory=str(DATA_DIR)), name="static")
 
 DATA_DIR = Path(__file__).parent / "data"
 DB_FILE = DATA_DIR / "records.json"
 DB_MANAGERS_FILE = DATA_DIR / "managers.json"
 DB_ORDERS_FILE = DATA_DIR / "orders.json"
+DB_INVOICES_FILE = DATA_DIR / "invoices.json"
+INVOICES_DIR = DATA_DIR / "invoices"
 _db_lock = Lock()
 
 
@@ -43,6 +48,9 @@ def _ensure_db_file() -> None:
 	_seed_default_managers_if_empty()
 	if not DB_ORDERS_FILE.exists():
 		DB_ORDERS_FILE.write_text("[]", encoding="utf-8")
+	if not DB_INVOICES_FILE.exists():
+		DB_INVOICES_FILE.write_text("[]", encoding="utf-8")
+	INVOICES_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _load_records() -> List[Dict[str, Any]]:
@@ -201,20 +209,6 @@ def list_managers() -> Dict[str, Any]:
 	return {"ok": True, "count": len(managers), "managers": managers}
 
 
-@app.delete("/api/managers/{manager_id}")
-def delete_manager(manager_id: str) -> Dict[str, Any]:
-	"""
-	Delete manager by id. Returns 404 if not found.
-	"""
-	with _db_lock:
-		managers = _load_list(DB_MANAGERS_FILE)
-		remaining = [m for m in managers if str(m.get("id")) != str(manager_id)]
-		if len(remaining) == len(managers):
-			raise HTTPException(status_code=404, detail="Manager not found")
-		_save_list(DB_MANAGERS_FILE, remaining)
-	return {"ok": True, "deleted_id": manager_id, "count": len(remaining)}
-
-
 @app.post("/api/orders")
 def create_order(payload: Dict[str, Any]) -> Dict[str, Any]:
 	"""
@@ -270,6 +264,90 @@ def list_orders() -> Dict[str, Any]:
 	with _db_lock:
 		orders = _load_list(DB_ORDERS_FILE)
 	return {"ok": True, "count": len(orders), "orders": orders}
+
+
+def _parse_iso_date_or_now(date_str: str | None) -> datetime:
+	if date_str:
+		try:
+			# Accept both date and datetime
+			return datetime.fromisoformat(date_str.replace("Z", "+00:00")).astimezone(tz=None).replace(tzinfo=None)
+		except ValueError:
+			pass
+	return datetime.utcnow()
+
+
+def _next_invoice_number(for_dt: datetime) -> str:
+	month_prefix = f"{for_dt.month:02d}-"
+	invoices = _load_list(DB_INVOICES_FILE)
+	max_suffix = 0
+	for inv in invoices:
+		num = str(inv.get("number") or "")
+		if num.startswith(month_prefix):
+			try:
+				suf = int(num.split("-")[1])
+				if suf > max_suffix:
+					max_suffix = suf
+			except Exception:
+				continue
+	next_suffix = max_suffix + 1
+	return f"{month_prefix}{next_suffix:03d}"
+
+
+@app.post("/api/invoices")
+async def create_invoice(
+	order_id: str | None = Form(default=None),
+	date: str | None = Form(default=None),
+	file: UploadFile | None = File(default=None),
+) -> Dict[str, Any]:
+	"""
+	Create an invoice with auto number MM-XXX. Optionally attach a file.
+	- order_id: optional link to an order
+	- date: optional ISO date; used for month in number; defaults to now
+	- file: optional file to store and serve later
+	"""
+	with _db_lock:
+		when = _parse_iso_date_or_now(date)
+		number = _next_invoice_number(when)
+
+		stored_filename = None
+		public_url = None
+		if file is not None:
+			original_name = Path(file.filename or "invoice.bin").name
+			stored_filename = f"{number}_{original_name}"
+			target_path = INVOICES_DIR / stored_filename
+			content = await file.read()
+			target_path.write_bytes(content)
+			public_url = f"/static/invoices/{stored_filename}"
+
+		invoices = _load_list(DB_INVOICES_FILE)
+		record = {
+			"id": f"inv_{int(when.timestamp())}_{len(invoices)+1}",
+			"number": number,
+			"order_id": order_id,
+			"date": when.isoformat() + "Z",
+			"file_name": stored_filename,
+			"file_url": public_url,
+			"created_at": datetime.utcnow().isoformat() + "Z",
+		}
+		invoices.append(record)
+		_save_list(DB_INVOICES_FILE, invoices)
+
+	return {"ok": True, "invoice": record}
+
+
+@app.get("/api/invoices")
+def list_invoices() -> Dict[str, Any]:
+	with _db_lock:
+		invoices = _load_list(DB_INVOICES_FILE)
+	return {"ok": True, "count": len(invoices), "invoices": invoices}
+
+
+@app.get("/api/invoices/next-number")
+def preview_next_invoice_number(date: str | None = None) -> Dict[str, Any]:
+	when = _parse_iso_date_or_now(date)
+	with _db_lock:
+		number = _next_invoice_number(when)
+	return {"ok": True, "number": number}
 
 
 @app.get("/")
