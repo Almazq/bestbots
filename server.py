@@ -6,7 +6,7 @@ from pathlib import Path
 from threading import Lock
 from typing import Any, Dict, List
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
@@ -297,6 +297,28 @@ def _next_invoice_number(for_dt: datetime) -> str:
 	next_suffix = max_suffix + 1
 	return f"{month_prefix}{next_suffix:03d}"
 
+def _invoice_number_exists(number: str) -> bool:
+	invoices = _load_list(DB_INVOICES_FILE)
+	for inv in invoices:
+		if str(inv.get("number")) == number:
+			return True
+	return False
+
+def _create_invoice_record(*, when: datetime, number: str, order_id: str | None, stored_filename: str | None, public_url: str | None) -> Dict[str, Any]:
+	invoices = _load_list(DB_INVOICES_FILE)
+	record = {
+		"id": f"inv_{int(when.timestamp())}_{len(invoices)+1}",
+		"number": number,
+		"order_id": order_id,
+		"date": when.isoformat() + "Z",
+		"file_name": stored_filename,
+		"file_url": public_url,
+		"created_at": datetime.utcnow().isoformat() + "Z",
+	}
+	invoices.append(record)
+	_save_list(DB_INVOICES_FILE, invoices)
+	return record
+
 
 @app.post("/api/invoices")
 async def create_invoice(
@@ -348,11 +370,86 @@ def list_invoices() -> Dict[str, Any]:
 
 
 @app.get("/api/invoices/next-number")
-def preview_next_invoice_number(date: str | None = None) -> Dict[str, Any]:
+def preview_next_invoice_number(date: str | None = None, response: Response = None) -> Dict[str, Any]:
 	when = _parse_iso_date_or_now(date)
 	with _db_lock:
 		number = _next_invoice_number(when)
+	# prevent browser/proxy caching
+	if response is not None:
+		response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+		response.headers["Pragma"] = "no-cache"
+		response.headers["Expires"] = "0"
 	return {"ok": True, "number": number}
+
+@app.post("/api/invoices/json")
+def create_invoice_json(payload: Dict[str, Any]) -> Dict[str, Any]:
+	"""
+	Create invoice using JSON (no file upload). Useful when the frontend
+	generates XLS locally and only needs to persist the number/linkage.
+	Body:
+	- order_id: optional str
+	- date: optional ISO string (used for month-based numbering)
+	- number: optional str; if omitted, auto-generate (MM-XXX). If provided,
+	  must be unique, otherwise 400.
+	- file_url: optional str (if already hosted elsewhere)
+	"""
+	if not isinstance(payload, dict):
+		raise HTTPException(status_code=400, detail="Invalid JSON body")
+	order_id = payload.get("order_id")
+	date_str = payload.get("date")
+	explicit_number = payload.get("number")
+	file_url = payload.get("file_url")
+
+	with _db_lock:
+		when = _parse_iso_date_or_now(date_str)
+		if explicit_number:
+			number = str(explicit_number).strip()
+			if not number:
+				raise HTTPException(status_code=400, detail="Field 'number' cannot be empty")
+			if _invoice_number_exists(number):
+				raise HTTPException(status_code=400, detail="Invoice number already exists")
+		else:
+			number = _next_invoice_number(when)
+
+		record = _create_invoice_record(
+			when=when,
+			number=number,
+			order_id=str(order_id) if order_id else None,
+			stored_filename=None,
+			public_url=str(file_url) if file_url else None,
+		)
+	return {"ok": True, "invoice": record}
+
+@app.patch("/api/invoices/{invoice_id}/file")
+async def attach_invoice_file(invoice_id: str, file: UploadFile = File(...)) -> Dict[str, Any]:
+	"""
+	Attach or replace a file for an existing invoice.
+	"""
+	if not file:
+		raise HTTPException(status_code=400, detail="File is required")
+	with _db_lock:
+		invoices = _load_list(DB_INVOICES_FILE)
+		target = None
+		for inv in invoices:
+			if str(inv.get("id")) == invoice_id:
+				target = inv
+				break
+		if target is None:
+			raise HTTPException(status_code=404, detail="Invoice not found")
+
+		number = str(target.get("number"))
+		original_name = Path(file.filename or "invoice.bin").name
+		stored_filename = f"{number}_{original_name}"
+		target_path = INVOICES_DIR / stored_filename
+		content = await file.read()
+		target_path.write_bytes(content)
+		public_url = f"/static/invoices/{stored_filename}"
+
+		target["file_name"] = stored_filename
+		target["file_url"] = public_url
+		_save_list(DB_INVOICES_FILE, invoices)
+
+	return {"ok": True, "invoice": target}
 
 
 @app.get("/")
