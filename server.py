@@ -23,9 +23,6 @@ app.add_middleware(
 	expose_headers=["*"],
 )
 
-# Serve files from data directory, including invoices
-app.mount("/static", StaticFiles(directory=str(DATA_DIR)), name="static")
-
 DATA_DIR = Path(__file__).parent / "data"
 DB_FILE = DATA_DIR / "records.json"
 DB_MANAGERS_FILE = DATA_DIR / "managers.json"
@@ -51,6 +48,11 @@ def _ensure_db_file() -> None:
 	if not DB_INVOICES_FILE.exists():
 		DB_INVOICES_FILE.write_text("[]", encoding="utf-8")
 	INVOICES_DIR.mkdir(parents=True, exist_ok=True)
+
+# Ensure data directories exist before mounting static
+_ensure_db_file()
+# Serve files from data directory, including invoices
+app.mount("/static", StaticFiles(directory=str(DATA_DIR)), name="static")
 
 
 def _load_records() -> List[Dict[str, Any]]:
