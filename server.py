@@ -29,6 +29,7 @@ DB_MANAGERS_FILE = DATA_DIR / "managers.json"
 DB_ORDERS_FILE = DATA_DIR / "orders.json"
 DB_INVOICES_FILE = DATA_DIR / "invoices.json"
 INVOICES_DIR = DATA_DIR / "invoices"
+DB_INVOICE_COUNTERS_FILE = DATA_DIR / "invoice_counters.json"  # { "YYYY-MM": last_suffix }
 _db_lock = Lock()
 
 
@@ -47,6 +48,8 @@ def _ensure_db_file() -> None:
 		DB_ORDERS_FILE.write_text("[]", encoding="utf-8")
 	if not DB_INVOICES_FILE.exists():
 		DB_INVOICES_FILE.write_text("[]", encoding="utf-8")
+	if not DB_INVOICE_COUNTERS_FILE.exists():
+		DB_INVOICE_COUNTERS_FILE.write_text("{}", encoding="utf-8")
 	INVOICES_DIR.mkdir(parents=True, exist_ok=True)
 
 # (moved below after function definitions)
@@ -111,6 +114,20 @@ def _load_list(file_path: Path) -> List[Dict[str, Any]]:
 def _save_list(file_path: Path, items: List[Dict[str, Any]]) -> None:
 	_tmp = file_path.with_suffix(".tmp")
 	_tmp.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
+	_tmp.replace(file_path)
+
+def _load_dict(file_path: Path) -> Dict[str, Any]:
+	_ensure_db_file()
+	try:
+		raw = file_path.read_text(encoding="utf-8")
+		data = json.loads(raw or "{}")
+		return data if isinstance(data, dict) else {}
+	except json.JSONDecodeError:
+		return {}
+
+def _save_dict(file_path: Path, data: Dict[str, Any]) -> None:
+	_tmp = file_path.with_suffix(".tmp")
+	_tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 	_tmp.replace(file_path)
 
 
@@ -297,6 +314,24 @@ def _next_invoice_number(for_dt: datetime) -> str:
 	next_suffix = max_suffix + 1
 	return f"{month_prefix}{next_suffix:03d}"
 
+def _reserve_next_invoice_number(for_dt: datetime) -> str:
+	"""
+	Atomically persist and return next invoice number for the month.
+	Keyed by YYYY-MM to avoid collisions across years.
+	"""
+	key = f"{for_dt.year:04d}-{for_dt.month:02d}"
+	counters = _load_dict(DB_INVOICE_COUNTERS_FILE)
+	# Ensure counter is at least the max from existing invoices
+	try:
+		preview_suffix = int(_next_invoice_number(for_dt).split("-")[1]) - 1
+	except Exception:
+		preview_suffix = 0
+	last = int(counters.get(key, 0))
+	next_suffix = max(last, preview_suffix) + 1
+	counters[key] = next_suffix
+	_save_dict(DB_INVOICE_COUNTERS_FILE, counters)
+	return f"{for_dt.month:02d}-{next_suffix:03d}"
+
 def _invoice_number_exists(number: str) -> bool:
 	invoices = _load_list(DB_INVOICES_FILE)
 	for inv in invoices:
@@ -324,6 +359,7 @@ def _create_invoice_record(*, when: datetime, number: str, order_id: str | None,
 async def create_invoice(
 	order_id: str | None = Form(default=None),
 	date: str | None = Form(default=None),
+	number: str | None = Form(default=None),
 	file: UploadFile | None = File(default=None),
 ) -> Dict[str, Any]:
 	"""
@@ -334,7 +370,12 @@ async def create_invoice(
 	"""
 	with _db_lock:
 		when = _parse_iso_date_or_now(date)
-		number = _next_invoice_number(when)
+		if number and str(number).strip():
+			number = str(number).strip()
+			if _invoice_number_exists(number):
+				raise HTTPException(status_code=400, detail="Invoice number already exists")
+		else:
+			number = _reserve_next_invoice_number(when)
 
 		stored_filename = None
 		public_url = None
@@ -370,10 +411,12 @@ def list_invoices() -> Dict[str, Any]:
 
 
 @app.get("/api/invoices/next-number")
-def preview_next_invoice_number(date: str | None = None, response: Response = None) -> Dict[str, Any]:
+def preview_next_invoice_number(date: str | None = None, reserve: str | None = None, response: Response = None) -> Dict[str, Any]:
 	when = _parse_iso_date_or_now(date)
 	with _db_lock:
-		number = _next_invoice_number(when)
+		# default: reserve to avoid повторов
+		do_reserve = True if reserve is None else str(reserve).lower() in ("1", "true", "yes")
+		number = _reserve_next_invoice_number(when) if do_reserve else _next_invoice_number(when)
 	# prevent browser/proxy caching
 	if response is not None:
 		response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
@@ -409,7 +452,7 @@ def create_invoice_json(payload: Dict[str, Any]) -> Dict[str, Any]:
 			if _invoice_number_exists(number):
 				raise HTTPException(status_code=400, detail="Invoice number already exists")
 		else:
-			number = _next_invoice_number(when)
+			number = _reserve_next_invoice_number(when)
 
 		record = _create_invoice_record(
 			when=when,
