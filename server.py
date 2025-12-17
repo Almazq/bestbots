@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 from threading import Lock
 from typing import Any, Dict, List
+from urllib.parse import parse_qs, unquote
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from aiogram import Bot
 
 
 app = FastAPI(title="BestsBot Backend", version="1.0.0")
@@ -31,6 +34,18 @@ DB_INVOICES_FILE = DATA_DIR / "invoices.json"
 INVOICES_DIR = DATA_DIR / "invoices"
 DB_INVOICE_COUNTERS_FILE = DATA_DIR / "invoice_counters.json"  # { "YYYY-MM": last_suffix }
 _db_lock = Lock()
+
+# Telegram Bot configuration
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8425860077:AAESfF3o_58rN9uKMtnWStW0iCyrJNqa56w")
+_telegram_bot: Bot | None = None
+
+
+def get_telegram_bot() -> Bot:
+	"""Get or create Telegram Bot instance."""
+	global _telegram_bot
+	if _telegram_bot is None:
+		_telegram_bot = Bot(token=BOT_TOKEN)
+	return _telegram_bot
 
 
 def _ensure_db_file() -> None:
@@ -129,6 +144,29 @@ def _save_dict(file_path: Path, data: Dict[str, Any]) -> None:
 	_tmp = file_path.with_suffix(".tmp")
 	_tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 	_tmp.replace(file_path)
+
+
+def _extract_user_id_from_init_data(init_data: str) -> str | None:
+	"""
+	Extract user_id from Telegram WebApp init_data.
+	init_data format: "user=%7B%22id%22%3A123456789%2C..."
+	"""
+	if not init_data:
+		return None
+	try:
+		# Parse query string
+		params = parse_qs(init_data)
+		user_str = params.get("user", [None])[0]
+		if user_str:
+			# Decode URL encoding
+			user_json = unquote(user_str)
+			user_data = json.loads(user_json)
+			user_id = user_data.get("id")
+			return str(user_id) if user_id else None
+	except (json.JSONDecodeError, KeyError, ValueError, TypeError) as e:
+		# Log error if needed, but don't fail
+		pass
+	return None
 
 
 @app.post("/api/records")
@@ -493,6 +531,94 @@ async def attach_invoice_file(invoice_id: str, file: UploadFile = File(...)) -> 
 		_save_list(DB_INVOICES_FILE, invoices)
 
 	return {"ok": True, "invoice": target}
+
+
+@app.post("/api/files/send-telegram")
+async def send_file_telegram(
+	file: UploadFile = File(...),
+	filename: str = Form(...),
+	init_data: str | None = Form(default=None),
+	user_id: str | None = Form(default=None),
+) -> Dict[str, Any]:
+	"""
+	Send file to user via Telegram Bot API.
+	Used by Telegram Mini App to send files that cannot be downloaded directly.
+	
+	Request:
+	- file: file to send
+	- filename: name of the file
+	- init_data: Telegram WebApp init_data (optional, for validation)
+	- user_id: Telegram user ID (optional, can be extracted from init_data)
+	
+	Response:
+	- success: bool
+	- message: str
+	"""
+	if not file:
+		raise HTTPException(status_code=400, detail="File is required")
+	
+	# Get chat_id from user_id or extract from init_data
+	chat_id = user_id
+	if not chat_id and init_data:
+		chat_id = _extract_user_id_from_init_data(init_data)
+	
+	if not chat_id:
+		raise HTTPException(
+			status_code=400,
+			detail="Не удалось определить ID пользователя. Укажите user_id или init_data"
+		)
+	
+	try:
+		chat_id_int = int(chat_id)
+	except (ValueError, TypeError):
+		raise HTTPException(status_code=400, detail="Некорректный user_id")
+	
+	# Read file content
+	file_content = await file.read()
+	
+	# Check file size (Telegram limit: 50 MB)
+	max_size = 50 * 1024 * 1024  # 50 MB
+	if len(file_content) > max_size:
+		raise HTTPException(
+			status_code=400,
+			detail=f"Файл слишком большой. Максимальный размер: 50 MB"
+		)
+	
+	try:
+		# Send file via Telegram Bot API
+		bot = get_telegram_bot()
+		
+		# Use BufferedInputFile for aiogram 3.x
+		from aiogram.types import BufferedInputFile
+		input_file = BufferedInputFile(file_content, filename=filename)
+		
+		await bot.send_document(
+			chat_id=chat_id_int,
+			document=input_file,
+		)
+		
+		return {
+			"success": True,
+			"message": f"Файл '{filename}' отправлен успешно"
+		}
+	except Exception as e:
+		error_msg = str(e)
+		# Handle common Telegram API errors
+		if "chat not found" in error_msg.lower() or "user not found" in error_msg.lower():
+			raise HTTPException(
+				status_code=404,
+				detail="Пользователь не найден. Убедитесь, что пользователь начал диалог с ботом."
+			)
+		elif "forbidden" in error_msg.lower():
+			raise HTTPException(
+				status_code=403,
+				detail="Бот заблокирован пользователем или не имеет доступа к отправке сообщений."
+			)
+		else:
+			raise HTTPException(
+				status_code=500,
+				detail=f"Ошибка при отправке файла: {error_msg}"
+			)
 
 
 @app.get("/")
