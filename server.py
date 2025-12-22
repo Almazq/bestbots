@@ -273,14 +273,14 @@ def list_managers() -> Dict[str, Any]:
 def create_order(payload: Dict[str, Any]) -> Dict[str, Any]:
 	"""
 	Orders table:
-	- id: str
+	- id: str (auto-generated if not provided)
 	- company_name: str (optional, может быть пустым для накладных из списка заказов)
 	- company_bin: str (optional, может быть пустым для накладных из списка заказов)
 	- manager_id: str
 	- full_data: dict (stores the entire request payload as-is)
 	
 	Принимает JSON с полями:
-	- id: обязательное
+	- id: опциональное (если не указано, генерируется автоматически)
 	- company_name или name_company: опциональное
 	- company_bin или bin_company: опциональное
 	- manager_id или id_manager: обязательное
@@ -294,31 +294,47 @@ def create_order(payload: Dict[str, Any]) -> Dict[str, Any]:
 	company_bin = str(payload.get("bin_company") or payload.get("company_bin") or "").strip()
 	manager_id = str(payload.get("id_manager") or payload.get("manager_id") or "").strip()
 	
-	if not order_id:
-		raise HTTPException(status_code=400, detail="Field 'id' is required")
+	# manager_id обязательное поле
 	if not manager_id:
 		raise HTTPException(status_code=400, detail="Field 'id_manager' (manager_id) is required")
-	# company_name и company_bin теперь опциональные (могут быть пустыми)
-
+	
+	# company_name и company_bin опциональные (могут быть пустыми)
+	
 	now_iso = datetime.utcnow().isoformat() + "Z"
-	order: Dict[str, Any] = {
-		"id": order_id,
-		"company_name": company_name,
-		"company_bin": company_bin,
-		"manager_id": manager_id,
-		"full_data": payload,
-		"created_at": now_iso,
-	}
-
+	
+	# Генерируем ID, если не указан или пустой
 	with _db_lock:
 		orders = _load_list(DB_ORDERS_FILE)
-		# replace if id exists, else append
+		
+		if not order_id:
+			# Генерируем уникальный ID: order_{timestamp}_{count}
+			timestamp = int(datetime.utcnow().timestamp())
+			order_id = f"order_{timestamp}_{len(orders) + 1}"
+		
+		# Проверяем, не существует ли уже заказ с таким ID
+		# Если существует и это не временный ID (temp_*), обновляем существующий
+		existing_index = None
 		for i, existing in enumerate(orders):
 			if str(existing.get("id")) == order_id:
-				orders[i] = order
+				existing_index = i
 				break
+		
+		order: Dict[str, Any] = {
+			"id": order_id,
+			"company_name": company_name,
+			"company_bin": company_bin,
+			"manager_id": manager_id,
+			"full_data": payload,
+			"created_at": now_iso,
+		}
+		
+		if existing_index is not None:
+			# Обновляем существующий заказ
+			orders[existing_index] = order
 		else:
+			# Добавляем новый заказ
 			orders.append(order)
+		
 		_save_list(DB_ORDERS_FILE, orders)
 
 	return {"ok": True, "id": order_id, "order": order}
