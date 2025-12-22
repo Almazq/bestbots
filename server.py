@@ -274,10 +274,17 @@ def create_order(payload: Dict[str, Any]) -> Dict[str, Any]:
 	"""
 	Orders table:
 	- id: str
-	- company_name: str
-	- company_bin: str
+	- company_name: str (optional, может быть пустым для накладных из списка заказов)
+	- company_bin: str (optional, может быть пустым для накладных из списка заказов)
 	- manager_id: str
 	- full_data: dict (stores the entire request payload as-is)
+	
+	Принимает JSON с полями:
+	- id: обязательное
+	- company_name или name_company: опциональное
+	- company_bin или bin_company: опциональное
+	- manager_id или id_manager: обязательное
+	- full_data: опциональное (весь payload сохраняется в full_data)
 	"""
 	if not isinstance(payload, dict):
 		raise HTTPException(status_code=400, detail="Invalid JSON body")
@@ -286,14 +293,12 @@ def create_order(payload: Dict[str, Any]) -> Dict[str, Any]:
 	company_name = str(payload.get("name_company") or payload.get("company_name") or "").strip()
 	company_bin = str(payload.get("bin_company") or payload.get("company_bin") or "").strip()
 	manager_id = str(payload.get("id_manager") or payload.get("manager_id") or "").strip()
+	
 	if not order_id:
 		raise HTTPException(status_code=400, detail="Field 'id' is required")
-	if not company_name:
-		raise HTTPException(status_code=400, detail="Field 'name_company' (company_name) is required")
-	if not company_bin:
-		raise HTTPException(status_code=400, detail="Field 'bin_company' (company_bin) is required")
 	if not manager_id:
 		raise HTTPException(status_code=400, detail="Field 'id_manager' (manager_id) is required")
+	# company_name и company_bin теперь опциональные (могут быть пустыми)
 
 	now_iso = datetime.utcnow().isoformat() + "Z"
 	order: Dict[str, Any] = {
@@ -316,7 +321,7 @@ def create_order(payload: Dict[str, Any]) -> Dict[str, Any]:
 			orders.append(order)
 		_save_list(DB_ORDERS_FILE, orders)
 
-	return {"ok": True, "order": order}
+	return {"ok": True, "id": order_id, "order": order}
 
 
 @app.get("/api/orders")
@@ -363,25 +368,32 @@ def get_orders_history() -> Dict[str, Any]:
 		orders_with_invoices = []
 		for order in orders:
 			order_id = str(order.get("id"))
-			order_copy = order.copy()
-			order_copy["invoices"] = invoices_by_order.get(order_id, [])
+			order_copy = {
+				"id": order.get("id"),
+				"company_name": order.get("company_name", ""),
+				"company_bin": order.get("company_bin", ""),
+				"manager_id": order.get("manager_id", ""),
+				"created_at": order.get("created_at", ""),
+			}
 			# Добавляем имя менеджера
 			manager_id = str(order.get("manager_id", ""))
 			order_copy["manager_name"] = managers_dict.get(manager_id, "")
+			
+			# Добавляем только нужные поля накладных
+			order_invoices = invoices_by_order.get(order_id, [])
+			order_copy["invoices"] = [
+				{
+					"id": inv.get("id"),
+					"number": inv.get("number"),
+					"date": inv.get("date"),
+					"file_url": inv.get("file_url"),
+				}
+				for inv in order_invoices
+			]
 			orders_with_invoices.append(order_copy)
 		
-		# Добавляем накладные без заказов как отдельные записи
-		for inv in invoices_without_order:
-			order_copy = {
-				"id": f"no_order_{inv.get('id')}",
-				"company_name": "Без заказа",
-				"company_bin": "",
-				"manager_id": "",
-				"manager_name": "",
-				"invoices": [inv],
-				"created_at": inv.get("created_at", inv.get("date", ""))
-			}
-			orders_with_invoices.append(order_copy)
+		# Накладные без заказов не показываем в истории заказов
+		# (они доступны через GET /api/invoices/history)
 		
 		# Сортируем по дате создания (новые сначала)
 		orders_with_invoices.sort(
@@ -557,7 +569,7 @@ async def create_invoice(
 		invoices.append(record)
 		_save_list(DB_INVOICES_FILE, invoices)
 
-	return {"ok": True, "invoice": record}
+	return {"ok": True, "id": record.get("id"), "invoice": record}
 
 
 @app.get("/api/invoices")
@@ -618,7 +630,7 @@ def create_invoice_json(payload: Dict[str, Any]) -> Dict[str, Any]:
 			stored_filename=None,
 			public_url=str(file_url) if file_url else None,
 		)
-	return {"ok": True, "invoice": record}
+	return {"ok": True, "id": record.get("id"), "invoice": record}
 
 @app.patch("/api/invoices/{invoice_id}/file")
 async def attach_invoice_file(invoice_id: str, file: UploadFile = File(...)) -> Dict[str, Any]:
@@ -649,7 +661,7 @@ async def attach_invoice_file(invoice_id: str, file: UploadFile = File(...)) -> 
 		target["file_url"] = public_url
 		_save_list(DB_INVOICES_FILE, invoices)
 
-	return {"ok": True, "invoice": target}
+	return {"ok": True, "id": target.get("id"), "invoice": target}
 
 
 @app.post("/api/files/send-telegram")
