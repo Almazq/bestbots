@@ -326,6 +326,55 @@ def list_orders() -> Dict[str, Any]:
 	return {"ok": True, "count": len(orders), "orders": orders}
 
 
+@app.get("/api/orders/history")
+def get_orders_history() -> Dict[str, Any]:
+	"""
+	Возвращает историю заказов с привязанными накладными.
+	Каждый заказ содержит массив связанных накладных.
+	Удобно для фронтенда для отображения истории заказов.
+	"""
+	with _db_lock:
+		orders = _load_list(DB_ORDERS_FILE)
+		invoices = _load_list(DB_INVOICES_FILE)
+		managers = _load_list(DB_MANAGERS_FILE)
+		
+		# Создаем словарь менеджеров для быстрого поиска
+		managers_dict = {str(m.get("id")): m.get("name") for m in managers}
+		
+		# Группируем накладные по order_id
+		invoices_by_order: Dict[str, List[Dict[str, Any]]] = {}
+		for inv in invoices:
+			order_id = inv.get("order_id")
+			if order_id:
+				order_id_str = str(order_id)
+				if order_id_str not in invoices_by_order:
+					invoices_by_order[order_id_str] = []
+				invoices_by_order[order_id_str].append(inv)
+		
+		# Объединяем заказы с накладными
+		orders_with_invoices = []
+		for order in orders:
+			order_id = str(order.get("id"))
+			order_copy = order.copy()
+			order_copy["invoices"] = invoices_by_order.get(order_id, [])
+			# Добавляем имя менеджера
+			manager_id = str(order.get("manager_id", ""))
+			order_copy["manager_name"] = managers_dict.get(manager_id, "")
+			orders_with_invoices.append(order_copy)
+		
+		# Сортируем по дате создания (новые сначала)
+		orders_with_invoices.sort(
+			key=lambda x: x.get("created_at", ""),
+			reverse=True
+		)
+	
+	return {
+		"ok": True,
+		"count": len(orders_with_invoices),
+		"orders": orders_with_invoices
+	}
+
+
 def _parse_iso_date_or_now(date_str: str | None) -> datetime:
 	if date_str:
 		try:
