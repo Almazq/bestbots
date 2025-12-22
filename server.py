@@ -392,8 +392,27 @@ def get_orders_history() -> Dict[str, Any]:
 			]
 			orders_with_invoices.append(order_copy)
 		
-		# Накладные без заказов не показываем в истории заказов
-		# (они доступны через GET /api/invoices/history)
+		# Добавляем накладные без заказов как виртуальные заказы
+		# Это нужно, чтобы фронтенд мог показать все накладные в истории
+		for inv in invoices_without_order:
+			# Создаем виртуальный заказ для накладной без заказа
+			order_copy = {
+				"id": f"no_order_{inv.get('id')}",
+				"company_name": "",
+				"company_bin": "",
+				"manager_id": "",
+				"manager_name": "",
+				"created_at": inv.get("created_at", inv.get("date", "")),
+				"invoices": [
+					{
+						"id": inv.get("id"),
+						"number": inv.get("number"),
+						"date": inv.get("date"),
+						"file_url": inv.get("file_url"),
+					}
+				],
+			}
+			orders_with_invoices.append(order_copy)
 		
 		# Сортируем по дате создания (новые сначала)
 		orders_with_invoices.sort(
