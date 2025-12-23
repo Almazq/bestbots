@@ -48,6 +48,38 @@ def get_telegram_bot() -> Bot:
 	return _telegram_bot
 
 
+def _migrate_add_status_field() -> None:
+	"""
+	Миграция: добавляет поле status в существующие заказы и накладные.
+	Вызывается при старте приложения для обеспечения обратной совместимости.
+	"""
+	try:
+		# Миграция заказов
+		if DB_ORDERS_FILE.exists():
+			orders = _load_list(DB_ORDERS_FILE)
+			needs_save = False
+			for order in orders:
+				if "status" not in order:
+					order["status"] = ""
+					needs_save = True
+			if needs_save:
+				_save_list(DB_ORDERS_FILE, orders)
+		
+		# Миграция накладных
+		if DB_INVOICES_FILE.exists():
+			invoices = _load_list(DB_INVOICES_FILE)
+			needs_save = False
+			for invoice in invoices:
+				if "status" not in invoice:
+					invoice["status"] = ""
+					needs_save = True
+			if needs_save:
+				_save_list(DB_INVOICES_FILE, invoices)
+	except Exception:
+		# Игнорируем ошибки миграции, чтобы не сломать старт приложения
+		pass
+
+
 def _ensure_db_file() -> None:
 	"""
 	Ensure data directory and JSON file exist.
@@ -66,6 +98,9 @@ def _ensure_db_file() -> None:
 	if not DB_INVOICE_COUNTERS_FILE.exists():
 		DB_INVOICE_COUNTERS_FILE.write_text("{}", encoding="utf-8")
 	INVOICES_DIR.mkdir(parents=True, exist_ok=True)
+	
+	# Выполняем миграцию для добавления поля status
+	_migrate_add_status_field()
 
 # (moved below after function definitions)
 
@@ -319,11 +354,18 @@ def create_order(payload: Dict[str, Any]) -> Dict[str, Any]:
 				existing_index = i
 				break
 		
+		# Получаем статус из payload или используем пустой по умолчанию
+		status = str(payload.get("status", "")).strip()
+		ALLOWED_STATUSES = ["", "production", "waiting", "shipped", "rejected"]
+		if status not in ALLOWED_STATUSES:
+			status = ""
+		
 		order: Dict[str, Any] = {
 			"id": order_id,
 			"company_name": company_name,
 			"company_bin": company_bin,
 			"manager_id": manager_id,
+			"status": status,
 			"full_data": payload,
 			"created_at": now_iso,
 		}
@@ -338,6 +380,43 @@ def create_order(payload: Dict[str, Any]) -> Dict[str, Any]:
 		_save_list(DB_ORDERS_FILE, orders)
 
 	return {"ok": True, "id": order_id, "order": order}
+
+
+@app.patch("/api/orders/{order_id}/status")
+def update_order_status(order_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+	"""
+	Обновляет статус заказа.
+	Принимает JSON: {"status": "production"} или {"status": ""}
+	Допустимые статусы: "", "production", "waiting", "shipped", "rejected"
+	"""
+	ALLOWED_STATUSES = ["", "production", "waiting", "shipped", "rejected"]
+	
+	if not isinstance(payload, dict):
+		raise HTTPException(status_code=400, detail="Invalid JSON body")
+	
+	status = str(payload.get("status", "")).strip()
+	if status not in ALLOWED_STATUSES:
+		raise HTTPException(
+			status_code=400,
+			detail=f"Invalid status. Allowed values: {ALLOWED_STATUSES}"
+		)
+	
+	with _db_lock:
+		orders = _load_list(DB_ORDERS_FILE)
+		order_index = None
+		for i, o in enumerate(orders):
+			if str(o.get("id")) == order_id:
+				order_index = i
+				break
+		
+		if order_index is None:
+			raise HTTPException(status_code=404, detail="Order not found")
+		
+		orders[order_index]["status"] = status
+		orders[order_index]["updated_at"] = datetime.utcnow().isoformat() + "Z"
+		_save_list(DB_ORDERS_FILE, orders)
+		
+		return {"ok": True, "order": orders[order_index]}
 
 
 @app.get("/api/orders")
@@ -389,18 +468,20 @@ def get_orders_history() -> Dict[str, Any]:
 				"company_name": order.get("company_name", ""),
 				"company_bin": order.get("company_bin", ""),
 				"manager_id": order.get("manager_id", ""),
+				"status": order.get("status", ""),  # Добавляем статус заказа
 				"created_at": order.get("created_at", ""),
 			}
 			# Добавляем имя менеджера
 			manager_id = str(order.get("manager_id", ""))
 			order_copy["manager_name"] = managers_dict.get(manager_id, "")
 			
-			# Добавляем только нужные поля накладных
+			# Добавляем только нужные поля накладных, включая статус
 			order_invoices = invoices_by_order.get(order_id, [])
 			order_copy["invoices"] = [
 				{
 					"id": inv.get("id"),
 					"number": inv.get("number"),
+					"status": inv.get("status", ""),  # Добавляем статус накладной
 					"date": inv.get("date"),
 					"file_url": inv.get("file_url"),
 				}
@@ -418,11 +499,13 @@ def get_orders_history() -> Dict[str, Any]:
 				"company_bin": "",
 				"manager_id": "",
 				"manager_name": "",
+				"status": "",  # Виртуальный заказ без статуса
 				"created_at": inv.get("created_at", inv.get("date", "")),
 				"invoices": [
 					{
 						"id": inv.get("id"),
 						"number": inv.get("number"),
+						"status": inv.get("status", ""),  # Добавляем статус накладной
 						"date": inv.get("date"),
 						"file_url": inv.get("file_url"),
 					}
@@ -543,12 +626,13 @@ def _invoice_number_exists(number: str) -> bool:
 			return True
 	return False
 
-def _create_invoice_record(*, when: datetime, number: str, order_id: str | None, stored_filename: str | None, public_url: str | None) -> Dict[str, Any]:
+def _create_invoice_record(*, when: datetime, number: str, order_id: str | None, stored_filename: str | None, public_url: str | None, status: str = "") -> Dict[str, Any]:
 	invoices = _load_list(DB_INVOICES_FILE)
 	record = {
 		"id": f"inv_{int(when.timestamp())}_{len(invoices)+1}",
 		"number": number,
 		"order_id": order_id,
+		"status": status,
 		"date": when.isoformat() + "Z",
 		"file_name": stored_filename,
 		"file_url": public_url,
@@ -596,6 +680,7 @@ async def create_invoice(
 			"id": f"inv_{int(when.timestamp())}_{len(invoices)+1}",
 			"number": number,
 			"order_id": order_id,
+			"status": "",  # Статус по умолчанию - пустая строка
 			"date": when.isoformat() + "Z",
 			"file_name": stored_filename,
 			"file_url": public_url,
@@ -658,12 +743,19 @@ def create_invoice_json(payload: Dict[str, Any]) -> Dict[str, Any]:
 		else:
 			number = _reserve_next_invoice_number(when)
 
+		# Получаем статус из payload или используем пустой по умолчанию
+		status = str(payload.get("status", "")).strip()
+		ALLOWED_STATUSES = ["", "production", "waiting", "shipped", "rejected"]
+		if status not in ALLOWED_STATUSES:
+			status = ""
+		
 		record = _create_invoice_record(
 			when=when,
 			number=number,
 			order_id=str(order_id) if order_id else None,
 			stored_filename=None,
 			public_url=str(file_url) if file_url else None,
+			status=status,
 		)
 	return {"ok": True, "id": record.get("id"), "invoice": record}
 
@@ -697,6 +789,43 @@ async def attach_invoice_file(invoice_id: str, file: UploadFile = File(...)) -> 
 		_save_list(DB_INVOICES_FILE, invoices)
 
 	return {"ok": True, "id": target.get("id"), "invoice": target}
+
+
+@app.patch("/api/invoices/{invoice_id}/status")
+def update_invoice_status(invoice_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+	"""
+	Обновляет статус накладной.
+	Принимает JSON: {"status": "shipped"} или {"status": ""}
+	Допустимые статусы: "", "production", "waiting", "shipped", "rejected"
+	"""
+	ALLOWED_STATUSES = ["", "production", "waiting", "shipped", "rejected"]
+	
+	if not isinstance(payload, dict):
+		raise HTTPException(status_code=400, detail="Invalid JSON body")
+	
+	status = str(payload.get("status", "")).strip()
+	if status not in ALLOWED_STATUSES:
+		raise HTTPException(
+			status_code=400,
+			detail=f"Invalid status. Allowed values: {ALLOWED_STATUSES}"
+		)
+	
+	with _db_lock:
+		invoices = _load_list(DB_INVOICES_FILE)
+		invoice_index = None
+		for i, inv in enumerate(invoices):
+			if str(inv.get("id")) == invoice_id:
+				invoice_index = i
+				break
+		
+		if invoice_index is None:
+			raise HTTPException(status_code=404, detail="Invoice not found")
+		
+		invoices[invoice_index]["status"] = status
+		invoices[invoice_index]["updated_at"] = datetime.utcnow().isoformat() + "Z"
+		_save_list(DB_INVOICES_FILE, invoices)
+		
+		return {"ok": True, "invoice": invoices[invoice_index]}
 
 
 @app.post("/api/files/send-telegram")
