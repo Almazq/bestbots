@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import random
+import string
 from datetime import datetime
 from pathlib import Path
 from threading import Lock
@@ -336,19 +338,15 @@ def list_managers() -> Dict[str, Any]:
 @app.post("/api/orders")
 def create_order(payload: Dict[str, Any]) -> Dict[str, Any]:
 	"""
-	Orders table:
-	- id: str (auto-generated if not provided)
-	- company_name: str (optional, может быть пустым для накладных из списка заказов)
-	- company_bin: str (optional, может быть пустым для накладных из списка заказов)
-	- manager_id: str
-	- full_data: dict (stores the entire request payload as-is)
+	Создает или обновляет заказ.
 	
 	Принимает JSON с полями:
-	- id: опциональное (если не указано, генерируется автоматически)
+	- id: опциональное (если начинается с temp_ или пустое, генерируется автоматически)
 	- company_name или name_company: опциональное
 	- company_bin или bin_company: опциональное
-	- manager_id или id_manager: обязательное
-	- full_data: опциональное (весь payload сохраняется в full_data)
+	- manager_id или id_manager: опциональное
+	- full_data: обязательное (полные данные заказа)
+	- status: опциональное (статус заказа)
 	"""
 	if not isinstance(payload, dict):
 		raise HTTPException(status_code=400, detail="Invalid JSON body")
@@ -357,26 +355,24 @@ def create_order(payload: Dict[str, Any]) -> Dict[str, Any]:
 	company_name = str(payload.get("name_company") or payload.get("company_name") or "").strip()
 	company_bin = str(payload.get("bin_company") or payload.get("company_bin") or "").strip()
 	manager_id = str(payload.get("id_manager") or payload.get("manager_id") or "").strip()
+	full_data = payload.get("full_data", {})
 	
-	# manager_id обязательное поле
-	if not manager_id:
-		raise HTTPException(status_code=400, detail="Field 'id_manager' (manager_id) is required")
-	
-	# company_name и company_bin опциональные (могут быть пустыми)
+	# company_name, company_bin, manager_id - все опциональные (могут быть пустыми)
 	
 	now_iso = datetime.utcnow().isoformat() + "Z"
 	
-	# Генерируем ID, если не указан или пустой
+	# Генерируем ID, если не указан, пустой или начинается с temp_
 	with _db_lock:
 		orders = _load_list(DB_ORDERS_FILE)
 		
-		if not order_id:
-			# Генерируем уникальный ID: order_{timestamp}_{count}
-			timestamp = int(datetime.utcnow().timestamp())
-			order_id = f"order_{timestamp}_{len(orders) + 1}"
+		# Если ID начинается с temp_ или пустой, генерируем новый уникальный ID
+		if not order_id or order_id.startswith("temp_"):
+			# Генерируем уникальный ID: order_{timestamp_ms}_{random}
+			timestamp_ms = int(datetime.utcnow().timestamp() * 1000)
+			random_suffix = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
+			order_id = f"order_{timestamp_ms}_{random_suffix}"
 		
 		# Проверяем, не существует ли уже заказ с таким ID
-		# Если существует и это не временный ID (temp_*), обновляем существующий
 		existing_index = None
 		for i, existing in enumerate(orders):
 			if str(existing.get("id")) == order_id:
@@ -389,21 +385,28 @@ def create_order(payload: Dict[str, Any]) -> Dict[str, Any]:
 		if status not in ALLOWED_STATUSES:
 			status = ""
 		
+		# Подготавливаем данные заказа
 		order: Dict[str, Any] = {
 			"id": order_id,
 			"company_name": company_name,
+			"name_company": payload.get("name_company", ""),
 			"company_bin": company_bin,
+			"bin_company": payload.get("bin_company", ""),
 			"manager_id": manager_id,
 			"status": status,
-			"full_data": payload,
-			"created_at": now_iso,
+			"full_data": full_data,
 		}
 		
 		if existing_index is not None:
-			# Обновляем существующий заказ
+			# Обновляем существующий заказ - сохраняем оригинальную дату создания
+			existing_order = orders[existing_index]
+			order["created_at"] = existing_order.get("created_at", now_iso)
+			order["updated_at"] = now_iso
 			orders[existing_index] = order
 		else:
-			# Добавляем новый заказ
+			# Создаем новый заказ
+			order["created_at"] = now_iso
+			order["updated_at"] = now_iso
 			orders.append(order)
 		
 		_save_list(DB_ORDERS_FILE, orders)
@@ -505,6 +508,7 @@ def get_orders_history() -> Dict[str, Any]:
 			"manager_id": order.get("manager_id", ""),
 			"status": order.get("status", ""),  # Добавляем статус заказа
 			"created_at": order.get("created_at", ""),
+			"updated_at": order.get("updated_at", ""),  # Добавляем дату обновления
 		}
 		# Добавляем имя менеджера
 		manager_id = str(order.get("manager_id", ""))
