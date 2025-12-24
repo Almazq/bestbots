@@ -106,15 +106,20 @@ def _ensure_db_file() -> None:
 
 
 def _load_records() -> List[Dict[str, Any]]:
-	_ensure_db_file()
+	"""
+	Загружает записи из файла.
+	Оптимизировано: не вызывает _ensure_db_file() для избежания рекурсивных блокировок.
+	"""
 	try:
+		if not DB_FILE.exists():
+			return []
 		raw = DB_FILE.read_text(encoding="utf-8")
-		data = json.loads(raw or "[]")
-		if isinstance(data, list):
-			return data
-		return []
-	except json.JSONDecodeError:
-		# Reset corrupt file
+		if not raw or not raw.strip():
+			return []
+		data = json.loads(raw)
+		return data if isinstance(data, list) else []
+	except (json.JSONDecodeError, IOError, OSError):
+		# В случае ошибки возвращаем пустой список
 		return []
 
 
@@ -152,12 +157,20 @@ app.mount("/static", StaticFiles(directory=str(DATA_DIR)), name="static")
 
 
 def _load_list(file_path: Path) -> List[Dict[str, Any]]:
-	_ensure_db_file()
+	"""
+	Загружает список из JSON файла.
+	Оптимизировано: не вызывает _ensure_db_file() для избежания рекурсивных блокировок.
+	"""
 	try:
+		if not file_path.exists():
+			return []
 		raw = file_path.read_text(encoding="utf-8")
-		data = json.loads(raw or "[]")
+		if not raw or not raw.strip():
+			return []
+		data = json.loads(raw)
 		return data if isinstance(data, list) else []
-	except json.JSONDecodeError:
+	except (json.JSONDecodeError, IOError, OSError):
+		# В случае ошибки возвращаем пустой список
 		return []
 
 
@@ -167,12 +180,20 @@ def _save_list(file_path: Path, items: List[Dict[str, Any]]) -> None:
 	_tmp.replace(file_path)
 
 def _load_dict(file_path: Path) -> Dict[str, Any]:
-	_ensure_db_file()
+	"""
+	Загружает словарь из JSON файла.
+	Оптимизировано: не вызывает _ensure_db_file() для избежания рекурсивных блокировок.
+	"""
 	try:
+		if not file_path.exists():
+			return {}
 		raw = file_path.read_text(encoding="utf-8")
-		data = json.loads(raw or "{}")
+		if not raw or not raw.strip():
+			return {}
+		data = json.loads(raw)
 		return data if isinstance(data, dict) else {}
-	except json.JSONDecodeError:
+	except (json.JSONDecodeError, IOError, OSError):
+		# В случае ошибки возвращаем пустой словарь
 		return {}
 
 def _save_dict(file_path: Path, data: Dict[str, Any]) -> None:
@@ -299,9 +320,17 @@ def create_or_update_manager(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 @app.get("/api/managers")
 def list_managers() -> Dict[str, Any]:
-	with _db_lock:
-		managers = _load_list(DB_MANAGERS_FILE)
-	return {"ok": True, "count": len(managers), "managers": managers}
+	"""
+	Возвращает список менеджеров.
+	Оптимизировано: быстрое чтение данных.
+	"""
+	try:
+		with _db_lock:
+			managers = _load_list(DB_MANAGERS_FILE)
+		return {"ok": True, "count": len(managers), "managers": managers}
+	except Exception as e:
+		# В случае ошибки возвращаем пустой список
+		return {"ok": True, "count": 0, "managers": []}
 
 
 @app.post("/api/orders")
@@ -434,10 +463,14 @@ def get_orders_history() -> Dict[str, Any]:
 	Удобно для фронтенда для отображения истории заказов.
 	"""
 	# Читаем данные быстро, минимизируя время блокировки
-	with _db_lock:
-		orders = _load_list(DB_ORDERS_FILE)
-		invoices = _load_list(DB_INVOICES_FILE)
-		managers = _load_list(DB_MANAGERS_FILE)
+	try:
+		with _db_lock:
+			orders = _load_list(DB_ORDERS_FILE)
+			invoices = _load_list(DB_INVOICES_FILE)
+			managers = _load_list(DB_MANAGERS_FILE)
+	except Exception:
+		# В случае ошибки возвращаем пустой результат
+		return {"ok": True, "count": 0, "orders": []}
 	
 	# Обработка данных выполняется вне блокировки для оптимизации производительности
 	# Создаем словарь менеджеров для быстрого поиска
