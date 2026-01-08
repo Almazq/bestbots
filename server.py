@@ -177,9 +177,25 @@ def _load_list(file_path: Path) -> List[Dict[str, Any]]:
 
 
 def _save_list(file_path: Path, items: List[Dict[str, Any]]) -> None:
-	_tmp = file_path.with_suffix(".tmp")
-	_tmp.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
-	_tmp.replace(file_path)
+	"""
+	Сохраняет список в JSON файл.
+	Использует временный файл для атомарной записи.
+	"""
+	try:
+		# Убеждаемся, что директория существует
+		file_path.parent.mkdir(parents=True, exist_ok=True)
+		
+		# Записываем во временный файл
+		_tmp = file_path.with_suffix(".tmp")
+		_tmp.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
+		
+		# Атомарно заменяем оригинальный файл
+		_tmp.replace(file_path)
+	except Exception as e:
+		# Логируем ошибку и пробрасываем дальше
+		import sys
+		print(f"ERROR: Failed to save list to {file_path}: {e}", file=sys.stderr)
+		raise
 
 def _load_dict(file_path: Path) -> Dict[str, Any]:
 	"""
@@ -345,11 +361,15 @@ def create_order(payload: Dict[str, Any]) -> Dict[str, Any]:
 	- company_name или name_company: опциональное
 	- company_bin или bin_company: опциональное
 	- manager_id или id_manager: опциональное
-	- full_data: обязательное (полные данные заказа)
+	- full_data: опциональное (полные данные заказа, может быть пустым объектом)
 	- status: опциональное (статус заказа)
 	"""
 	if not isinstance(payload, dict):
 		raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+	# Логируем входящий запрос для отладки
+	import sys
+	print(f"DEBUG: Received order creation request: {json.dumps(payload, ensure_ascii=False)[:500]}", file=sys.stderr)
 
 	order_id = str(payload.get("id", "")).strip()
 	company_name = str(payload.get("name_company") or payload.get("company_name") or "").strip()
@@ -358,60 +378,77 @@ def create_order(payload: Dict[str, Any]) -> Dict[str, Any]:
 	full_data = payload.get("full_data", {})
 	
 	# company_name, company_bin, manager_id - все опциональные (могут быть пустыми)
+	# full_data тоже опциональное (может быть пустым объектом или любым объектом)
+	# Бэкенд не валидирует содержимое full_data - принимает как есть
 	
 	now_iso = datetime.utcnow().isoformat() + "Z"
 	
 	# Генерируем ID, если не указан, пустой или начинается с temp_
-	with _db_lock:
-		orders = _load_list(DB_ORDERS_FILE)
-		
-		# Если ID начинается с temp_ или пустой, генерируем новый уникальный ID
-		if not order_id or order_id.startswith("temp_"):
-			# Генерируем уникальный ID: order_{timestamp_ms}_{random}
-			timestamp_ms = int(datetime.utcnow().timestamp() * 1000)
-			random_suffix = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
-			order_id = f"order_{timestamp_ms}_{random_suffix}"
-		
-		# Проверяем, не существует ли уже заказ с таким ID
-		existing_index = None
-		for i, existing in enumerate(orders):
-			if str(existing.get("id")) == order_id:
-				existing_index = i
-				break
-		
-		# Получаем статус из payload или используем пустой по умолчанию
-		status = str(payload.get("status", "")).strip()
-		ALLOWED_STATUSES = ["", "production", "waiting", "shipped", "rejected"]
-		if status not in ALLOWED_STATUSES:
-			status = ""
-		
-		# Подготавливаем данные заказа
-		order: Dict[str, Any] = {
-			"id": order_id,
-			"company_name": company_name,
-			"name_company": payload.get("name_company", ""),
-			"company_bin": company_bin,
-			"bin_company": payload.get("bin_company", ""),
-			"manager_id": manager_id,
-			"status": status,
-			"full_data": full_data,
-		}
-		
-		if existing_index is not None:
-			# Обновляем существующий заказ - сохраняем оригинальную дату создания
-			existing_order = orders[existing_index]
-			order["created_at"] = existing_order.get("created_at", now_iso)
-			order["updated_at"] = now_iso
-			orders[existing_index] = order
-		else:
-			# Создаем новый заказ
-			order["created_at"] = now_iso
-			order["updated_at"] = now_iso
-			orders.append(order)
-		
-		_save_list(DB_ORDERS_FILE, orders)
+	try:
+		with _db_lock:
+			orders = _load_list(DB_ORDERS_FILE)
+			
+			# Если ID начинается с temp_ или пустой, генерируем новый уникальный ID
+			if not order_id or order_id.startswith("temp_"):
+				# Генерируем уникальный ID: order_{timestamp_ms}_{random}
+				timestamp_ms = int(datetime.utcnow().timestamp() * 1000)
+				random_suffix = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
+				order_id = f"order_{timestamp_ms}_{random_suffix}"
+			
+			# Проверяем, не существует ли уже заказ с таким ID
+			existing_index = None
+			for i, existing in enumerate(orders):
+				if str(existing.get("id")) == order_id:
+					existing_index = i
+					break
+			
+			# Получаем статус из payload или используем пустой по умолчанию
+			status = str(payload.get("status", "")).strip()
+			ALLOWED_STATUSES = ["", "production", "waiting", "shipped", "rejected"]
+			if status not in ALLOWED_STATUSES:
+				status = ""
+			
+			# Подготавливаем данные заказа
+			order: Dict[str, Any] = {
+				"id": order_id,
+				"company_name": company_name,
+				"name_company": payload.get("name_company", ""),
+				"company_bin": company_bin,
+				"bin_company": payload.get("bin_company", ""),
+				"manager_id": manager_id,
+				"status": status,
+				"full_data": full_data,
+			}
+			
+			if existing_index is not None:
+				# Обновляем существующий заказ - сохраняем оригинальную дату создания
+				existing_order = orders[existing_index]
+				order["created_at"] = existing_order.get("created_at", now_iso)
+				order["updated_at"] = now_iso
+				orders[existing_index] = order
+			else:
+				# Создаем новый заказ
+				order["created_at"] = now_iso
+				order["updated_at"] = now_iso
+				orders.append(order)
+			
+			try:
+				_save_list(DB_ORDERS_FILE, orders)
+			except Exception as e:
+				# Логируем ошибку сохранения
+				import sys
+				print(f"ERROR: Failed to save order: {e}", file=sys.stderr)
+				raise HTTPException(status_code=500, detail=f"Failed to save order: {str(e)}")
 
-	return {"ok": True, "id": order_id, "order": order}
+		return {"ok": True, "id": order_id, "order": order}
+	except HTTPException:
+		# Пробрасываем HTTP исключения как есть
+		raise
+	except Exception as e:
+		# Логируем общую ошибку
+		import sys
+		print(f"ERROR: Failed to create order: {e}", file=sys.stderr)
+		raise HTTPException(status_code=500, detail=f"Failed to create order: {str(e)}")
 
 
 @app.patch("/api/orders/{order_id}/status")
@@ -456,6 +493,38 @@ def list_orders() -> Dict[str, Any]:
 	with _db_lock:
 		orders = _load_list(DB_ORDERS_FILE)
 	return {"ok": True, "count": len(orders), "orders": orders}
+
+
+@app.delete("/api/orders/{order_id}")
+def delete_order(order_id: str) -> Dict[str, Any]:
+	"""
+	Удаляет заказ по ID.
+	"""
+	try:
+		with _db_lock:
+			orders = _load_list(DB_ORDERS_FILE)
+			
+			# Ищем заказ для удаления
+			order_index = None
+			for i, order in enumerate(orders):
+				if str(order.get("id")) == order_id:
+					order_index = i
+					break
+			
+			if order_index is None:
+				raise HTTPException(status_code=404, detail="Заказ не найден")
+			
+			# Удаляем заказ
+			orders.pop(order_index)
+			_save_list(DB_ORDERS_FILE, orders)
+		
+		return {"ok": True, "message": "Заказ удален"}
+	except HTTPException:
+		raise
+	except Exception as e:
+		import sys
+		print(f"ERROR: Failed to delete order: {e}", file=sys.stderr)
+		raise HTTPException(status_code=500, detail=f"Ошибка при удалении заказа: {str(e)}")
 
 
 @app.get("/api/orders/history")
@@ -869,22 +938,69 @@ def update_invoice_status(invoice_id: str, payload: Dict[str, Any]) -> Dict[str,
 		return {"ok": True, "invoice": invoices[invoice_index]}
 
 
+@app.delete("/api/invoices/{invoice_id}")
+def delete_invoice(invoice_id: str) -> Dict[str, Any]:
+	"""
+	Удаляет накладную по ID.
+	Также удаляет файл накладной с диска, если он существует.
+	"""
+	try:
+		with _db_lock:
+			invoices = _load_list(DB_INVOICES_FILE)
+			
+			# Ищем накладную для удаления
+			invoice_index = None
+			target_invoice = None
+			for i, inv in enumerate(invoices):
+				if str(inv.get("id")) == invoice_id:
+					invoice_index = i
+					target_invoice = inv
+					break
+			
+			if invoice_index is None:
+				raise HTTPException(status_code=404, detail="Накладная не найдена")
+			
+			# Удаляем файл накладной с диска, если он существует
+			file_name = target_invoice.get("file_name")
+			if file_name:
+				file_path = INVOICES_DIR / file_name
+				try:
+					if file_path.exists():
+						file_path.unlink()
+				except Exception as e:
+					# Логируем ошибку удаления файла, но не прерываем удаление записи
+					import sys
+					print(f"WARNING: Failed to delete invoice file {file_name}: {e}", file=sys.stderr)
+			
+			# Удаляем накладную из БД
+			invoices.pop(invoice_index)
+			_save_list(DB_INVOICES_FILE, invoices)
+		
+		return {"ok": True, "message": "Накладная удалена"}
+	except HTTPException:
+		raise
+	except Exception as e:
+		import sys
+		print(f"ERROR: Failed to delete invoice: {e}", file=sys.stderr)
+		raise HTTPException(status_code=500, detail=f"Ошибка при удалении накладной: {str(e)}")
+
+
 @app.post("/api/files/send-telegram")
 async def send_file_telegram(
 	file: UploadFile = File(...),
-	filename: str = Form(...),
+	filename: str | None = Form(default=None),
 	init_data: str | None = Form(default=None),
 	user_id: str | None = Form(default=None),
 ) -> Dict[str, Any]:
 	"""
-	Send file to user via Telegram Bot API.
-	Used by Telegram Mini App to send files that cannot be downloaded directly.
+	Отправляет файл пользователю через Telegram Bot API.
+	Используется Telegram Mini App для отправки файлов, которые нельзя скачать напрямую.
 	
 	Request:
-	- file: file to send
-	- filename: name of the file
-	- init_data: Telegram WebApp init_data (optional, for validation)
-	- user_id: Telegram user ID (optional, can be extracted from init_data)
+	- file: файл для отправки (обязательное)
+	- filename: имя файла (опциональное, если не указано, берется из file.filename)
+	- init_data: Telegram WebApp init_data (опциональное, для проверки подлинности)
+	- user_id: Telegram user ID (опциональное, может быть извлечен из init_data)
 	
 	Response:
 	- success: bool
@@ -892,6 +1008,9 @@ async def send_file_telegram(
 	"""
 	if not file:
 		raise HTTPException(status_code=400, detail="File is required")
+	
+	# Используем переданное имя файла или имя из UploadFile
+	file_name = filename or file.filename or "file"
 	
 	# Get chat_id from user_id or extract from init_data
 	chat_id = user_id
@@ -926,7 +1045,7 @@ async def send_file_telegram(
 		
 		# Use BufferedInputFile for aiogram 3.x
 		from aiogram.types import BufferedInputFile
-		input_file = BufferedInputFile(file_content, filename=filename)
+		input_file = BufferedInputFile(file_content, filename=file_name)
 		
 		await bot.send_document(
 			chat_id=chat_id_int,
@@ -935,7 +1054,7 @@ async def send_file_telegram(
 		
 		return {
 			"success": True,
-			"message": f"Файл '{filename}' отправлен успешно"
+			"message": f"Файл '{file_name}' отправлен вам в Telegram"
 		}
 	except Exception as e:
 		error_msg = str(e)
